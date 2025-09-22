@@ -30,8 +30,17 @@ import {
 	syntaxHighlighting,
 	defaultHighlightStyle
 } from '@codemirror/language';
+import { oneDark } from '@codemirror/theme-one-dark';
 import { highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view';
 import { highlightSelectionMatches } from '@codemirror/search';
+
+function createThemeExtensions(theme: 'light' | 'dark') {
+	if (theme === 'light') {
+		return [syntaxHighlighting(defaultHighlightStyle, { fallback: true })];
+	}
+
+	return [oneDark];
+}
 
 function createTheme(theme: 'light' | 'dark') {
 	return EditorView.theme(
@@ -222,7 +231,6 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		dropCursor(),
 		EditorState.allowMultipleSelections.of(true),
 		indentOnInput(),
-		syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
 		bracketMatching(),
 		closeBrackets(),
 		highlightSpecialChars(),
@@ -239,7 +247,7 @@ export function createEditorInstance(options: CreateEditorOptions) {
 				onChange?.(update.state.doc.toString());
 			}
 		}),
-		themeCompartment.of(createTheme(currentTheme)),
+		themeCompartment.of([createTheme(currentTheme), ...createThemeExtensions(currentTheme)]),
 		readOnlyCompartment.of(disabled ? EditorState.readOnly.of(true) : []),
 		...(lspClient ? [lspClient.plugin('file:///sql-editor.sql')] : [])
 	];
@@ -283,7 +291,10 @@ export function createEditorInstance(options: CreateEditorOptions) {
 	const updateTheme = (newTheme: 'light' | 'dark') => {
 		currentTheme = newTheme;
 		view.dispatch({
-			effects: themeCompartment.reconfigure(createTheme(newTheme))
+			effects: themeCompartment.reconfigure([
+				createTheme(newTheme),
+				...createThemeExtensions(newTheme)
+			])
 		});
 	};
 
