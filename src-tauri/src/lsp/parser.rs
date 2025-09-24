@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use tree_sitter::{Node, Parser, Point, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{InputEdit, Node, Parser, Point, Query, QueryCursor, StreamingIterator, Tree};
+
+use crate::lsp::ContentChange;
 
 /// Main parsing context that tracks the current state and provides suggestions
 pub struct ParsingContext {
@@ -345,35 +347,70 @@ impl ParsingContext {
     ///
     /// This updates the internal document state and re-parses the content
     /// using incremental parsing when possible.
-    pub fn did_change(&mut self, new_text: String) -> crate::Result<()> {
-        println!(
-            "DEBUG: did_change called with text: '{}' (len: {})",
-            new_text,
-            new_text.len()
-        );
-
-        // Check if the text actually changed
-        if self.query == new_text {
-            println!("DEBUG: Text unchanged, keeping existing tree");
-            return Ok(());
-        }
+    pub fn did_change(&mut self, change: ContentChange) -> crate::Result<()> {
+        log::debug!("did_change called {:?}", change);
 
         let old_len = self.query.len();
-        self.query = new_text;
-        println!(
-            "DEBUG: Query changed from {} to {} bytes",
-            old_len,
-            self.query.len()
-        );
+        match change {
+            ContentChange::Full { text } => {
+                // Check if the text actually changed
+                if self.query == text {
+                    println!("DEBUG: Text unchanged, keeping existing tree");
+                    return Ok(());
+                }
+                self.query = text;
+                self.current_tree = None;
+                println!(
+                    "DEBUG: Query changed from {} to {} bytes",
+                    old_len,
+                    self.query.len()
+                );
+            }
+            ContentChange::Incremental { range, text } => {
+                let start_byte = range.start.offset(&self.query);
+                let old_end_byte = range.end.offset(&self.query);
+                let new_end_byte = start_byte + text.len();
+                let new_end_position: Point = {
+                    let lines: Vec<&str> = text.lines().collect();
+                    if lines.len() <= 1 {
+                        let first_line = lines.first().unwrap_or(&"");
+                        Point::new(
+                            range.start.line as usize,
+                            range.start.character as usize + first_line.chars().count(),
+                        )
+                    } else {
+                        let last_line = lines.last().unwrap_or(&"");
+                        Point::new(
+                            range.start.line as usize + lines.len() - 1,
+                            last_line.chars().count(),
+                        )
+                    }
+                };
 
-        // Skip test queries to reduce debug spam
+                if let Some(current_tree) = &mut self.current_tree {
+                    current_tree.edit(&InputEdit {
+                        start_byte,
+                        old_end_byte,
+                        new_end_byte,
+                        new_end_position,
+                        start_position: range.start.into_point(),
+                        old_end_position: range.end.into_point(),
+                    });
+                }
+
+                self.query.replace_range(start_byte..old_end_byte, &text);
+            }
+        };
+
+        // TODO: Skip test queries to reduce debug spam
 
         if let Some(tree) = self.parser.parse(&self.query, self.current_tree.as_ref()) {
             let tree_end = tree.root_node().end_byte();
-            println!(
-                "DEBUG: Successfully parsed new tree (root ends at byte {}, query len: {})",
+            log::info!(
+                "Successfully parsed new tree (root ends at byte {}, query len: {}, old query len: {})",
                 tree_end,
-                self.query.len()
+                self.query.len(),
+                old_len
             );
 
             // Check if the tree parsed the entire query
@@ -1280,7 +1317,9 @@ mod tests {
         {
             // Simulate LSP didChange event
             context
-                .did_change(query.to_string())
+                .did_change(ContentChange::Full {
+                    text: query.to_string(),
+                })
                 .expect(&format!("Failed to parse query: '{}'", query));
 
             // Simulate LSP completion request

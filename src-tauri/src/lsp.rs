@@ -5,7 +5,6 @@ use std::{
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tauri::{AppHandle, Emitter, Event, Listener, Manager};
 use uuid::Uuid;
 
@@ -159,11 +158,51 @@ pub struct Position {
     pub line: u32,
 }
 
+impl Position {
+    /// Transfer into Point
+    fn into_point(&self) -> Point {
+        Point {
+            row: self.line as usize,
+            column: self.character as usize,
+        }
+    }
+
+    /// Convert to a byte offset in the query
+    fn offset(&self, query: &str) -> usize {
+        let mut offset = 0;
+        for (line_idx, line) in query.lines().enumerate() {
+            if line_idx as u32 == self.line {
+                offset += line
+                    .chars()
+                    .take(self.character as usize)
+                    .map(|c| c.len_utf8())
+                    .sum::<usize>();
+                break;
+            }
+            offset += line.len() + 1;
+        }
+        offset
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionContext {
     pub trigger_character: Option<String>,
     pub trigger_kind: u32,
+}
+
+#[derive(Deserialize, Debug)]
+struct Range {
+    start: Position,
+    end: Position,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum ContentChange {
+    Incremental { range: Range, text: String },
+    Full { text: String },
 }
 
 pub fn setup_listener(app: AppHandle) {
@@ -405,8 +444,6 @@ impl LanguageServer {
     fn lsp_request(&mut self, event: Event) -> Result<(), Error> {
         // The message arrives annoyingly escaped, requires unescaping
         let message = serde_json::from_str::<String>(event.payload())?;
-
-        let json = serde_json::from_str::<Value>(&message)?;
 
         match serde_json::from_str::<Request>(&message) {
             Ok(request) => {
@@ -772,7 +809,9 @@ impl LanguageServer {
 
         if let Some(params) = &request.params {
             let params = serde_json::from_value::<DidOpenParams>(params.clone())?;
-            self.parsing_context.did_change(params.text_document.text)?;
+            self.parsing_context.did_change(ContentChange::Full {
+                text: params.text_document.text,
+            })?;
         }
 
         Ok(())
@@ -784,18 +823,13 @@ impl LanguageServer {
         struct DidChangeParams {
             content_changes: Vec<ContentChange>,
         }
-        // TODO(vini): handle when the client sends just the diff
-        #[derive(Deserialize, Debug)]
-        struct ContentChange {
-            text: String,
-        }
 
         log::info!("Handling didChange notification");
         if let Some(params) = &request.params {
             let params = serde_json::from_value::<DidChangeParams>(params.clone())?;
             // log::info!("Deserialized didChange: {:?}", params);
             for content_change in params.content_changes {
-                self.parsing_context.did_change(content_change.text)?;
+                self.parsing_context.did_change(content_change)?;
             }
         }
 
