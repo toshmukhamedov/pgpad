@@ -74,7 +74,8 @@ pub fn run() {
             let handle = app.handle();
             let monitor = ConnectionMonitor::new(handle.clone());
             handle.manage(monitor);
-            lsp::setup_listener(handle.clone());
+            // lsp::setup_listener(handle.clone());
+            lsp::init_transport(handle.clone())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -367,8 +367,10 @@ impl ParsingContext {
                 );
             }
             ContentChange::Incremental { range, text } => {
-                let start_byte = range.start.offset(&self.query);
-                let old_end_byte = range.end.offset(&self.query);
+                let start_position = range.start.to_point();
+                let old_end_position = range.end.to_point();
+                let start_byte = self.point_to_byte(start_position);
+                let old_end_byte = self.point_to_byte(old_end_position);
                 let new_end_byte = start_byte + text.len();
                 let new_end_position: Point = {
                     let lines: Vec<&str> = text.lines().collect();
@@ -393,8 +395,8 @@ impl ParsingContext {
                         old_end_byte,
                         new_end_byte,
                         new_end_position,
-                        start_position: range.start.into_point(),
-                        old_end_position: range.end.into_point(),
+                        start_position,
+                        old_end_position,
                     });
                 }
 
@@ -623,17 +625,15 @@ impl ParsingContext {
         let text_up_to_cursor = &self.query[..cursor_byte.min(self.query.len())];
 
         // Find the last word before the cursor
-        let mut word_start = None;
+        let mut start = 0;
 
         // Look backwards from cursor to find word boundaries
         for (i, ch) in text_up_to_cursor.char_indices().rev() {
             if ch.is_whitespace() || ch == '(' || ch == ')' || ch == ',' || ch == ';' {
-                word_start = Some(i + ch.len_utf8());
+                start = i + ch.len_utf8();
                 break;
             }
         }
-
-        let start = word_start.unwrap_or(0);
 
         // If we're at the end of a word or there's no current word being typed
         if start >= text_up_to_cursor.len() {
@@ -727,11 +727,13 @@ impl ParsingContext {
 
     /// Determine the current parse state based on tree analysis
     fn determine_parse_state(&self, cursor_point: Point) -> ParseState {
+        println!("determine_parse_state {}", self.current_tree.is_some());
         let Some(tree) = self.current_tree.as_ref() else {
             return ParseState::Initial;
         };
         // For incomplete queries, use text-based analysis combined with tree structure
         let state = self.analyze_query_text_context(cursor_point);
+        println!("analyze_query_text_context provided state {:?}", state);
 
         // If text-based analysis gives us a specific state, use it
         if !matches!(state, ParseState::Initial) {
@@ -1134,7 +1136,7 @@ impl ParsingContext {
             "DEBUG: Tree validation - tree expects {} bytes, query has {} bytes",
             tree_text_len, query_len
         );
-        println!("DEBUG: Query content: '{}'", self.query);
+        println!("DEBUG: Query content: '{}'", self.query.len());
 
         // Debug: print the tree structure and check for errors
         println!("DEBUG: Tree structure (query len: {}):", query_len);
@@ -1196,9 +1198,19 @@ impl ParsingContext {
             }
         };
 
-        println!("{}{}({}): '{}'", indent, node.kind(), node.id(), node_text);
+        println!(
+            "{}{}({}): '{}'",
+            indent,
+            node.kind(),
+            node.id(),
+            if node_text.contains("\n") {
+                node_text.len().to_string()
+            } else {
+                node_text
+            },
+        );
 
-        if depth < 3 {
+        if depth < 10 {
             // Limit depth to avoid too much output
             let mut cursor = node.walk();
             if cursor.goto_first_child() {

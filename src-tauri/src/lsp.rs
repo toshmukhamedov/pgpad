@@ -1,4 +1,6 @@
 use std::{
+    io::{Read, Write},
+    process::{Command, Stdio},
     sync::{mpsc::channel, Arc},
     time::Instant,
 };
@@ -160,28 +162,11 @@ pub struct Position {
 
 impl Position {
     /// Transfer into Point
-    fn into_point(&self) -> Point {
+    fn to_point(&self) -> Point {
         Point {
             row: self.line as usize,
             column: self.character as usize,
         }
-    }
-
-    /// Convert to a byte offset in the query
-    fn offset(&self, query: &str) -> usize {
-        let mut offset = 0;
-        for (line_idx, line) in query.lines().enumerate() {
-            if line_idx as u32 == self.line {
-                offset += line
-                    .chars()
-                    .take(self.character as usize)
-                    .map(|c| c.len_utf8())
-                    .sum::<usize>();
-                break;
-            }
-            offset += line.len() + 1;
-        }
-        offset
     }
 }
 
@@ -877,4 +862,83 @@ impl LanguageServer {
             .context("Failed to emit LSP response")
             .map_err(Into::into)
     }
+}
+
+pub fn init_transport(handle: AppHandle) -> Result<(), String> {
+    let mut child = Command::new("sqls")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let mut stdin = child.stdin.take().ok_or("failed to take stdin")?;
+    let mut stdout = child.stdout.take().ok_or("failed to take stdout")?;
+
+    let (tx, rx) = channel::<Event>();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        while let Ok(event) = rx.recv() {
+            // unescaping payload
+            let msg = serde_json::from_str::<String>(event.payload()).unwrap();
+            let data = format!("Content-Length: {}\r\n\r\n{}", msg.len(), msg);
+            if let Err(e) = stdin.write_all(data.as_bytes()) {
+                log::error!("stdin failed to write to sqls: {}", e);
+                break;
+            }
+        }
+    });
+
+    let app_handle = handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut buffer = Vec::new();
+        let mut tmp = [0; 1024];
+        loop {
+            let n = match stdout.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    log::error!("stdout read error: {}", e);
+                    break;
+                }
+            };
+            buffer.extend_from_slice(&tmp[..n]);
+
+            while let Some(msg) = parse_lsp_message(&mut buffer) {
+                app_handle.emit("lsp-response", msg).unwrap();
+            }
+        }
+    });
+
+    handle.listen("lsp-request", move |event| {
+        if let Err(e) = tx.send(event) {
+            log::error!("failed to send over mpsc channel: {}", e);
+        }
+    });
+
+    log::info!("LSP transport initialized");
+
+    Ok(())
+}
+
+fn parse_lsp_message(buffer: &mut Vec<u8>) -> Option<String> {
+    let s = String::from_utf8_lossy(buffer);
+    if let Some(header_end) = s.find("\r\n\r\n") {
+        let headers = &s[..header_end];
+        let mut content_length = 0;
+        for line in headers.lines() {
+            if let Some(rest) = line.strip_prefix("Content-Length: ") {
+                content_length = rest.trim().parse().unwrap_or(0);
+            }
+        }
+
+        let start = header_end + 4;
+        let end = start + content_length;
+        if buffer.len() >= end {
+            let msg = String::from_utf8_lossy(&buffer[start..end]).to_string();
+            buffer.drain(..end);
+            return Some(msg);
+        }
+    }
+    None
 }
