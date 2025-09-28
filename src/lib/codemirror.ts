@@ -173,8 +173,8 @@ export function createEditorInstance(options: CreateEditorOptions) {
 	const themeCompartment = new Compartment();
 	const readOnlyCompartment = new Compartment();
 
-	const lspTransport = new TauriLSPTransport();
-	const lspClient = new LSPClient({ extensions: languageServerExtensions() }).connect(lspTransport);
+	const lspClient = new LSPClient({ extensions: languageServerExtensions() });
+	const lspTransport = new TauriLSPTransport(lspClient);
 
 	const extensions: Extension[] = [
 		keymap.of([
@@ -240,7 +240,7 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		highlightActiveLineGutter(),
 		highlightSelectionMatches(),
 		keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
-		sql({ dialect: PostgreSQL }),
+		sql({ dialect: PostgreSQL, upperCaseKeywords: true }),
 		EditorView.lineWrapping,
 		EditorView.updateListener.of((update) => {
 			if (update.docChanged) {

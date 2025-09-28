@@ -1,5 +1,6 @@
 use std::{
-    io::{Read, Write},
+    fs,
+    io::{self, Read, Write},
     process::{Command, Stdio},
     sync::{mpsc::channel, Arc},
     time::Instant,
@@ -7,11 +8,18 @@ use std::{
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::fs::Permissions;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use tauri::{AppHandle, Emitter, Event, Listener, Manager};
 use uuid::Uuid;
+use zip::ZipArchive;
 
 use crate::{
     database::types::DatabaseSchema,
+    github,
     lsp::parser::{ParsingContext, SuggestionCategory, SuggestionType},
     AppState, Error,
 };
@@ -864,16 +872,82 @@ impl LanguageServer {
     }
 }
 
-pub fn init_transport(handle: AppHandle) -> Result<(), String> {
-    let mut child = Command::new("sqls")
+pub fn init_transport(handle: AppHandle) -> anyhow::Result<()> {
+    let release = github::get_latest_release("sqls-server", "sqls")?;
+
+    let path = handle.path();
+
+    #[cfg(unix)]
+    let file_name = "sqls";
+    #[cfg(not(unix))]
+    let file_name = "sqls.exe";
+
+    let sqls = format!("sqls-{}", release.tag_name);
+    let sqls_path = path
+        .config_dir()?
+        .join("pgpad")
+        .clone()
+        .join("sqls")
+        .join(release.tag_name)
+        .join(file_name);
+
+    if !sqls_path.exists() {
+        let parent_dir = sqls_path
+            .parent()
+            .context(format!("getting parent of {:?} failed", sqls_path))?;
+
+        if !parent_dir.exists() {
+            fs::create_dir_all(parent_dir)?;
+        }
+
+        log::info!("Downloading {}", sqls);
+
+        #[cfg(target_os = "macos")]
+        let platform = "darwin";
+
+        #[cfg(target_os = "windows")]
+        let platform = "windows";
+
+        #[cfg(target_os = "linux")]
+        let platform = "linux";
+
+        let asset = match release
+            .assets
+            .iter()
+            .find(|asset| asset.name.contains(platform))
+        {
+            Some(asset) => asset,
+            None => anyhow::bail!("{} doesn't support {}", sqls, platform),
+        };
+
+        let response = reqwest::blocking::get(asset.browser_download_url.clone())?;
+        let cursor = io::Cursor::new(response.bytes()?);
+
+        // asset will be zip
+        let mut archive = ZipArchive::new(cursor)?;
+        let mut content = archive.by_index(0)?;
+
+        let mut file = fs::File::create(&sqls_path)?;
+        io::copy(&mut content, &mut file)?;
+
+        #[cfg(unix)]
+        {
+            let permissions = Permissions::from_mode(0o755); // rwxr-xr-x
+            file.set_permissions(permissions)?;
+        }
+
+        log::info!("{} downloaded", sqls);
+    }
+
+    let mut child = Command::new(&sqls_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .spawn()?;
 
-    let mut stdin = child.stdin.take().ok_or("failed to take stdin")?;
-    let mut stdout = child.stdout.take().ok_or("failed to take stdout")?;
+    println!("Spawned {:?}", sqls_path);
+    let mut stdin = child.stdin.take().context("failed to take stdin")?;
+    let mut stdout = child.stdout.take().context("failed to take stdout")?;
 
     let (tx, rx) = channel::<Event>();
 
@@ -904,8 +978,12 @@ pub fn init_transport(handle: AppHandle) -> Result<(), String> {
             };
             buffer.extend_from_slice(&tmp[..n]);
 
+            println!("Buffer {:?}", String::from_utf8(buffer.clone()));
             while let Some(msg) = parse_lsp_message(&mut buffer) {
-                app_handle.emit("lsp-response", msg).unwrap();
+                println!("Parsed {:?}", msg);
+                if let Err(e) = app_handle.emit("lsp-response", msg) {
+                    log::error!("Emitting lsp-response failed {}", e);
+                };
             }
         }
     });
@@ -915,6 +993,10 @@ pub fn init_transport(handle: AppHandle) -> Result<(), String> {
             log::error!("failed to send over mpsc channel: {}", e);
         }
     });
+
+    if let Err(e) = handle.emit("lsp-initialized", ()) {
+        log::error!("Emitting lsp-initialized failed {}", e);
+    };
 
     log::info!("LSP transport initialized");
 

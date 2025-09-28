@@ -1,13 +1,14 @@
 mod credentials;
 mod database;
 mod error;
+mod github;
 mod init;
 mod lsp;
 mod storage;
 mod utils;
 mod window;
 
-use std::sync::Arc;
+use std::{sync::Arc, thread};
 
 use dashmap::DashMap;
 use tauri::Manager;
@@ -75,7 +76,14 @@ pub fn run() {
             let monitor = ConnectionMonitor::new(handle.clone());
             handle.manage(monitor);
             // lsp::setup_listener(handle.clone());
-            lsp::init_transport(handle.clone())?;
+            let app_handle = handle.clone();
+            thread::spawn(move || {
+                if let Err(e) = lsp::init_transport(app_handle) {
+                    log::error!("LSP initializing transport failed: {}", e);
+                }
+            });
+
+            handle.asset_resolver();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
